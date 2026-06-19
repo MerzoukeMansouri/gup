@@ -1,0 +1,20 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: MerzoukeMansouri/rust-github-reusable/.github/workflows/ci.yml@main
+
+  release:
+    needs: ci
+    uses: MerzoukeMansouri/rust-github-reusable/.github/workflows/release.yml@main
+    with:
+      binary_name: gup
+      repo: MerzoukeMansouri/gup
+      formula_class: Gup
+      formula_desc: "git add + commit + push with conventional commits and AI message generation"
+    secrets:
+      TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
