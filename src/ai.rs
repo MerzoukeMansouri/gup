@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader};
+use std::sync::mpsc::Sender;
 
 const OLLAMA_URL: &str = "http://localhost:11434/api/generate";
 const MODEL: &str = "devstral-small-2:24b-cloud";
@@ -12,8 +14,56 @@ struct Request<'a> {
 }
 
 #[derive(Deserialize)]
-struct Response {
+struct StreamChunk {
     response: String,
+    done: bool,
+}
+
+fn stream_generate(prompt: String, tx: Sender<Result<String>>) {
+    let client = reqwest::blocking::Client::new();
+    let resp = match client
+        .post(OLLAMA_URL)
+        .json(&Request {
+            model: MODEL,
+            prompt,
+            stream: true,
+        })
+        .send()
+        .context("failed to reach Ollama — is it running on localhost:11434?")
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(Err(e));
+            return;
+        }
+    };
+
+    let reader = BufReader::new(resp);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow::anyhow!(e)));
+                return;
+            }
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let chunk: StreamChunk = match serde_json::from_str(&line) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow::anyhow!(e)));
+                return;
+            }
+        };
+        if !chunk.response.is_empty() && tx.send(Ok(chunk.response)).is_err() {
+            return;
+        }
+        if chunk.done {
+            return;
+        }
+    }
 }
 
 pub fn generate_with_hint(
@@ -21,7 +71,8 @@ pub fn generate_with_hint(
     commit_type: Option<&str>,
     hint: Option<&str>,
     scope: Option<&str>,
-) -> Result<String> {
+    tx: Sender<Result<String>>,
+) {
     let type_rule = match commit_type {
         Some(t) => format!(
             "The commit type is fixed: '{t}'. Output ONLY the description after '{t}: ' — do NOT include the type prefix in your response."
@@ -54,47 +105,22 @@ pub fn generate_with_hint(
         Diff:\n{diff}"
     );
 
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .post(OLLAMA_URL)
-        .json(&Request {
-            model: MODEL,
-            prompt,
-            stream: false,
-        })
-        .send()
-        .context("failed to reach Ollama — is it running on localhost:11434?")?;
-
-    let body: Response = resp.json().context("failed to parse Ollama response")?;
-    Ok(strip_fences(body.response.trim()))
+    stream_generate(prompt, tx);
 }
 
-pub fn generate_body(diff: &str, subject: &str) -> Result<String> {
+pub fn generate_body(diff: &str, subject: &str, tx: Sender<Result<String>>) {
     let prompt = format!(
-        "Generate a conventional commit BODY for this change.\n\
-        The commit subject line is: \"{subject}\"\n\
+        "Write a short paragraph explaining WHY this change was made.\n\
+        Commit subject: \"{subject}\"\n\
         Rules:\n\
-        - 2-4 sentences max\n\
-        - Explain WHY the change was made, not WHAT (the subject covers that)\n\
+        - 2-4 sentences\n\
+        - Explain the motivation and context, not what changed (the subject covers that)\n\
         - Wrap lines at 72 characters\n\
-        - Plain prose, no bullet points, no markdown\n\
-        - Output ONLY the body text, nothing else\n\
+        - Plain prose, no bullets, no markdown\n\
+        - Output ONLY the body paragraph, nothing else\n\
         Diff:\n{diff}"
     );
-
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .post(OLLAMA_URL)
-        .json(&Request {
-            model: MODEL,
-            prompt,
-            stream: false,
-        })
-        .send()
-        .context("failed to reach Ollama — is it running on localhost:11434?")?;
-
-    let body: Response = resp.json().context("failed to parse Ollama response")?;
-    Ok(strip_fences(body.response.trim()))
+    stream_generate(prompt, tx);
 }
 
 pub(crate) fn strip_fences(s: &str) -> String {

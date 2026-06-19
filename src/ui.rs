@@ -139,21 +139,35 @@ fn event_loop<B: ratatui::backend::Backend>(
 
         terminal.draw(|f| render(f, app))?;
 
-        let gen_result: Option<Result<String>> = match &app.state {
-            State::Loading { rx, .. } => match rx.try_recv() {
-                Ok(r) => Some(r),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(anyhow::anyhow!("AI generation thread died")))
+        // Drain streaming chunks from subject generation.
+        let mut subject_chunks: Vec<String> = Vec::new();
+        let mut subject_done = false;
+        let mut subject_err: Option<anyhow::Error> = None;
+        if let State::Loading { rx, .. } = &app.state {
+            loop {
+                match rx.try_recv() {
+                    Ok(Ok(chunk)) => subject_chunks.push(chunk),
+                    Ok(Err(e)) => {
+                        subject_err = Some(e);
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        subject_done = true;
+                        break;
+                    }
                 }
-            },
-            _ => None,
-        };
-        if let Some(res) = gen_result {
-            let raw = res?;
+            }
+        }
+        if let Some(e) = subject_err {
+            return Err(e);
+        }
+        for chunk in subject_chunks {
+            app.msg.push_str(&chunk);
+        }
+        if subject_done {
+            let raw = crate::ai::strip_fences(app.msg.trim());
             if app.commit_type.is_none() {
-                // AI returned a full "type: desc" string — parse so scope/! can be applied.
-                // parse_full_commit extracts only the header description (no body paragraphs).
                 let (parsed_type, _, _, parsed_desc, _) = parse_full_commit(&raw);
                 if let Some(t) = parsed_type {
                     app.commit_type = Some(t);
@@ -162,27 +176,40 @@ fn event_loop<B: ratatui::backend::Backend>(
                     app.msg = raw.lines().next().unwrap_or("").to_string();
                 }
             } else {
-                // Type was pre-set; AI returned description only. Take first line in case
-                // the model returned extra paragraphs.
                 app.msg = raw.lines().next().unwrap_or("").to_string();
             }
             app.state = State::Menu { selected: 0 };
             continue;
         }
 
-        let body_result: Option<Result<String>> = if let Some(rx) = &app.body_rx {
-            match rx.try_recv() {
-                Ok(r) => Some(r),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(anyhow::anyhow!("body generation thread died")))
+        // Drain streaming chunks from body generation.
+        let mut body_chunks: Vec<String> = Vec::new();
+        let mut body_done = false;
+        let mut body_err: Option<anyhow::Error> = None;
+        if let Some(rx) = &app.body_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(Ok(chunk)) => body_chunks.push(chunk),
+                    Ok(Err(e)) => {
+                        body_err = Some(e);
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        body_done = true;
+                        break;
+                    }
                 }
             }
-        } else {
-            None
-        };
-        if let Some(res) = body_result {
-            app.body = res?;
+        }
+        if let Some(e) = body_err {
+            return Err(e);
+        }
+        for chunk in body_chunks {
+            app.body.push_str(&chunk);
+        }
+        if body_done {
+            app.body = crate::ai::strip_fences(app.body.trim()).to_string();
             app.body_rx = None;
         }
 
@@ -351,18 +378,14 @@ fn spawn_generation(
     let scope = scope.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let scope_arg = if scope.is_empty() {
-            None
-        } else {
-            Some(scope.as_str())
-        };
-        let result = crate::ai::generate_with_hint(
+        let scope_arg = if scope.is_empty() { None } else { Some(scope.as_str()) };
+        crate::ai::generate_with_hint(
             &diff,
             commit_type.as_deref(),
             feedback.as_deref(),
             scope_arg,
+            tx,
         );
-        tx.send(result).ok();
     });
     rx
 }
@@ -372,7 +395,7 @@ fn spawn_body_generation(diff: &str, subject: &str) -> Receiver<Result<String>> 
     let subject = subject.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        tx.send(crate::ai::generate_body(&diff, &subject)).ok();
+        crate::ai::generate_body(&diff, &subject, tx);
     });
     rx
 }
