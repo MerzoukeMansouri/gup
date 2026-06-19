@@ -378,7 +378,11 @@ fn spawn_generation(
     let scope = scope.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let scope_arg = if scope.is_empty() { None } else { Some(scope.as_str()) };
+        let scope_arg = if scope.is_empty() {
+            None
+        } else {
+            Some(scope.as_str())
+        };
         crate::ai::generate_with_hint(
             &diff,
             commit_type.as_deref(),
