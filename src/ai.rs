@@ -20,12 +20,20 @@ pub fn generate_with_hint(
     diff: &str,
     commit_type: Option<&str>,
     hint: Option<&str>,
+    scope: Option<&str>,
 ) -> Result<String> {
     let type_rule = match commit_type {
         Some(t) => format!(
             "The commit type is fixed: '{t}'. Output ONLY the description after '{t}: ' — do NOT include the type prefix in your response."
         ),
         None => "Choose the most appropriate conventional commit type (feat, fix, docs, chore, refactor, test, style, perf, ci, build, revert). Output the full message as <type>: <description>.".to_string(),
+    };
+
+    let scope_note = match scope {
+        Some(s) if !s.is_empty() => format!(
+            "The commit scope is '{s}' — factor this into your description if relevant, but do NOT include the type or scope prefix in your output.\n"
+        ),
+        _ => String::new(),
     };
 
     let hint_section = match hint {
@@ -36,12 +44,41 @@ pub fn generate_with_hint(
     let prompt = format!(
         "Generate a conventional commit message for the following staged diff.\n\
         {type_rule}\n\
+        {scope_note}\
         Rules:\n\
         - Max 72 characters total\n\
         - Imperative mood (\"add\", not \"added\")\n\
         - Be specific, not generic\n\
         - Output ONLY the commit message line, nothing else\n\
         {hint_section}\n\
+        Diff:\n{diff}"
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(OLLAMA_URL)
+        .json(&Request {
+            model: MODEL,
+            prompt,
+            stream: false,
+        })
+        .send()
+        .context("failed to reach Ollama — is it running on localhost:11434?")?;
+
+    let body: Response = resp.json().context("failed to parse Ollama response")?;
+    Ok(strip_fences(body.response.trim()))
+}
+
+pub fn generate_body(diff: &str, subject: &str) -> Result<String> {
+    let prompt = format!(
+        "Generate a conventional commit BODY for this change.\n\
+        The commit subject line is: \"{subject}\"\n\
+        Rules:\n\
+        - 2-4 sentences max\n\
+        - Explain WHY the change was made, not WHAT (the subject covers that)\n\
+        - Wrap lines at 72 characters\n\
+        - Plain prose, no bullet points, no markdown\n\
+        - Output ONLY the body text, nothing else\n\
         Diff:\n{diff}"
     );
 

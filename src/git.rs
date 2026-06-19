@@ -29,6 +29,18 @@ pub fn push() -> Result<()> {
     run("git", &["push"])
 }
 
+pub fn last_commit_message() -> Result<String> {
+    let out = Command::new("git")
+        .args(["log", "-1", "--pretty=%B"])
+        .output()
+        .context("failed to run git log -1 --pretty=%B")?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+pub fn commit_amend(message: &str) -> Result<()> {
+    run("git", &["commit", "--amend", "-m", message])
+}
+
 pub fn staged_stat() -> Result<Vec<FileStat>> {
     let out = Command::new("git")
         .args(["diff", "--staged", "--numstat"])

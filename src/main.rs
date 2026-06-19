@@ -1,4 +1,5 @@
 mod ai;
+mod commit;
 mod git;
 mod ui;
 
@@ -29,10 +30,19 @@ struct Cli {
     /// Stage and commit only, skip push
     #[arg(long)]
     no_push: bool,
+
+    /// Amend the last commit instead of creating a new one
+    #[arg(long)]
+    amend: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.amend {
+        return run_amend(&cli);
+    }
+
     let (commit_type, raw_message) = resolve_args(&cli)?;
 
     git::add_all()?;
@@ -48,22 +58,70 @@ fn main() -> Result<()> {
     let stats = git::staged_stat().unwrap_or_default();
     let log = git::log_graph().unwrap_or_default();
 
+    // Pass raw description only — build_commit_message assembles type+scope+! at Proceed time.
     let initial_msg = if cli.ai {
-        None // TUI shows spinner while generating
+        None
     } else {
-        Some(match commit_type {
-            Some(t) => format!("{t}: {}", raw_message.unwrap()),
-            None => raw_message.unwrap().to_string(),
-        })
+        Some(raw_message.unwrap().to_string())
     };
 
-    let commit_msg = ui::run(initial_msg, commit_type, cli.ai, diff, stats, log)?;
+    let commit_msg = ui::run(
+        initial_msg,
+        commit_type,
+        cli.ai,
+        diff,
+        stats,
+        log,
+        String::new(),
+        false,
+        String::new(),
+    )?;
 
     git::commit(&commit_msg)?;
     if !cli.no_push {
         git::push()?;
         eprintln!("pushed");
     }
+    Ok(())
+}
+
+fn run_amend(cli: &Cli) -> Result<()> {
+    let last = git::last_commit_message()?;
+    let (parsed_type, parsed_scope, parsed_breaking, parsed_desc, parsed_body) =
+        commit::parse_full_commit(&last);
+
+    let diff = if cli.ai {
+        git::staged_diff().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let stats = git::staged_stat().unwrap_or_default();
+    let log = git::log_graph().unwrap_or_default();
+
+    // Use parsed type only if it's a known conventional type.
+    let commit_type = parsed_type.as_deref().filter(|t| TYPES.contains(t));
+
+    // initial_msg: description when type is known, full first line otherwise.
+    let initial_msg = if commit_type.is_some() {
+        Some(parsed_desc)
+    } else {
+        Some(last.lines().next().unwrap_or("").to_string())
+    };
+
+    let commit_msg = ui::run(
+        initial_msg,
+        commit_type,
+        cli.ai,
+        diff,
+        stats,
+        log,
+        parsed_scope,
+        parsed_breaking,
+        parsed_body,
+    )?;
+
+    git::commit_amend(&commit_msg)?;
+    eprintln!("amended");
     Ok(())
 }
 
@@ -107,6 +165,7 @@ mod tests {
             message: message.map(str::to_string),
             ai,
             no_push: false,
+            amend: false,
         }
     }
 
