@@ -17,11 +17,20 @@ struct Response {
 }
 
 pub fn generate(diff: &str, commit_type: Option<&str>) -> Result<String> {
+    generate_with_hint(diff, commit_type, None)
+}
+
+pub fn generate_with_hint(diff: &str, commit_type: Option<&str>, hint: Option<&str>) -> Result<String> {
     let type_rule = match commit_type {
         Some(t) => format!(
             "The commit type is fixed: '{t}'. Output ONLY the description after '{t}: ' — do NOT include the type prefix in your response."
         ),
         None => "Choose the most appropriate conventional commit type (feat, fix, docs, chore, refactor, test, style, perf, ci, build, revert). Output the full message as <type>: <description>.".to_string(),
+    };
+
+    let hint_section = match hint {
+        Some(h) if !h.is_empty() => format!("\nUser feedback on previous attempt: {h}\n"),
+        _ => String::new(),
     };
 
     let prompt = format!(
@@ -31,7 +40,8 @@ pub fn generate(diff: &str, commit_type: Option<&str>) -> Result<String> {
         - Max 72 characters total\n\
         - Imperative mood (\"add\", not \"added\")\n\
         - Be specific, not generic\n\
-        - Output ONLY the commit message line, nothing else\n\n\
+        - Output ONLY the commit message line, nothing else\n\
+        {hint_section}\n\
         Diff:\n{diff}"
     );
 

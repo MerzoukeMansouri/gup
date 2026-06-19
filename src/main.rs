@@ -57,6 +57,30 @@ fn main() -> Result<()> {
     };
 
     eprintln!("commit: {commit_msg}");
+
+    let commit_msg = if confirm("Proceed?")? {
+        commit_msg
+    } else {
+        let feedback = prompt_input("What to change? ")?;
+        if cli.ai {
+            let diff = git::staged_diff()?;
+            let body = ai::generate_with_hint(&diff, commit_type, Some(&feedback))?;
+            let msg = match commit_type {
+                Some(t) => format!("{t}: {body}"),
+                None => body,
+            };
+            eprintln!("commit: {msg}");
+            msg
+        } else {
+            let msg = match commit_type {
+                Some(t) => format!("{t}: {feedback}"),
+                None => feedback,
+            };
+            eprintln!("commit: {msg}");
+            msg
+        }
+    };
+
     git::commit(&commit_msg)?;
 
     if !cli.no_push {
@@ -65,6 +89,25 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    use std::io::Write;
+    eprint!("{prompt} [Y/n] ");
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let t = input.trim().to_lowercase();
+    Ok(t.is_empty() || t == "y" || t == "yes")
+}
+
+fn prompt_input(prompt: &str) -> Result<String> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
 }
 
 fn resolve_args(cli: &Cli) -> Result<(Option<&str>, Option<&str>)> {
