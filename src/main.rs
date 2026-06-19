@@ -1,5 +1,6 @@
 mod ai;
 mod git;
+mod ui;
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -32,82 +33,32 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
     let (commit_type, raw_message) = resolve_args(&cli)?;
 
     git::add_all()?;
-
     if !git::has_staged_changes()? {
         bail!("nothing to commit — working tree clean");
     }
 
-    let commit_msg = if cli.ai {
-        let diff = git::staged_diff()?;
-        let body = ai::generate(&diff, commit_type)?;
-        match commit_type {
-            Some(t) => format!("{t}: {body}"),
-            None => body,
-        }
+    let diff = if cli.ai { git::staged_diff()? } else { String::new() };
+
+    let initial_msg = if cli.ai {
+        None // TUI shows spinner while generating
     } else {
-        let body = raw_message.unwrap();
-        match commit_type {
-            Some(t) => format!("{t}: {body}"),
-            None => body.to_string(),
-        }
+        Some(match commit_type {
+            Some(t) => format!("{t}: {}", raw_message.unwrap()),
+            None => raw_message.unwrap().to_string(),
+        })
     };
 
-    eprintln!("commit: {commit_msg}");
-
-    let commit_msg = if confirm("Proceed?")? {
-        commit_msg
-    } else {
-        let feedback = prompt_input("What to change? ")?;
-        if cli.ai {
-            let diff = git::staged_diff()?;
-            let body = ai::generate_with_hint(&diff, commit_type, Some(&feedback))?;
-            let msg = match commit_type {
-                Some(t) => format!("{t}: {body}"),
-                None => body,
-            };
-            eprintln!("commit: {msg}");
-            msg
-        } else {
-            let msg = match commit_type {
-                Some(t) => format!("{t}: {feedback}"),
-                None => feedback,
-            };
-            eprintln!("commit: {msg}");
-            msg
-        }
-    };
+    let commit_msg = ui::run(initial_msg, commit_type, cli.ai, diff)?;
 
     git::commit(&commit_msg)?;
-
     if !cli.no_push {
         git::push()?;
         eprintln!("pushed");
     }
-
     Ok(())
-}
-
-fn confirm(prompt: &str) -> Result<bool> {
-    use std::io::Write;
-    eprint!("{prompt} [Y/n] ");
-    std::io::stderr().flush()?;
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let t = input.trim().to_lowercase();
-    Ok(t.is_empty() || t == "y" || t == "yes")
-}
-
-fn prompt_input(prompt: &str) -> Result<String> {
-    use std::io::Write;
-    eprint!("{prompt}");
-    std::io::stderr().flush()?;
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
 }
 
 fn resolve_args(cli: &Cli) -> Result<(Option<&str>, Option<&str>)> {
@@ -115,10 +66,8 @@ fn resolve_args(cli: &Cli) -> Result<(Option<&str>, Option<&str>)> {
     let message = cli.message.as_deref();
 
     match (first, message, cli.ai) {
-        // gup --ai
         (None, None, true) => Ok((None, None)),
 
-        // gup feat --ai  |  gup feat "msg"
         (Some(t), msg, _) if TYPES.contains(&t) => {
             if !cli.ai && msg.is_none() {
                 bail!("'{t}' requires a message or --ai");
@@ -126,10 +75,8 @@ fn resolve_args(cli: &Cli) -> Result<(Option<&str>, Option<&str>)> {
             Ok((Some(t), msg))
         }
 
-        // gup "raw commit message"  (no type prefix)
         (Some(raw), None, false) => Ok((None, Some(raw))),
 
-        // gup unknown-type "msg"  — typo guard
         (Some(bad), Some(_), _) => {
             bail!("'{bad}' is not a valid commit type. Valid: {}", TYPES.join(", "))
         }
@@ -138,5 +85,91 @@ fn resolve_args(cli: &Cli) -> Result<(Option<&str>, Option<&str>)> {
             "usage:\n  gup <type> <message>\n  gup <type> --ai\n  gup --ai\n\nTypes: {}",
             TYPES.join(", ")
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_cli(first: Option<&str>, message: Option<&str>, ai: bool) -> Cli {
+        Cli {
+            first: first.map(str::to_string),
+            message: message.map(str::to_string),
+            ai,
+            no_push: false,
+        }
+    }
+
+    #[test]
+    fn ai_only_no_type() {
+        let cli = make_cli(None, None, true);
+        let (t, m) = resolve_args(&cli).unwrap();
+        assert_eq!(t, None);
+        assert_eq!(m, None);
+    }
+
+    #[test]
+    fn valid_type_with_message() {
+        let cli = make_cli(Some("feat"), Some("add login"), false);
+        let (t, m) = resolve_args(&cli).unwrap();
+        assert_eq!(t, Some("feat"));
+        assert_eq!(m, Some("add login"));
+    }
+
+    #[test]
+    fn valid_type_with_ai() {
+        let cli = make_cli(Some("fix"), None, true);
+        let (t, m) = resolve_args(&cli).unwrap();
+        assert_eq!(t, Some("fix"));
+        assert_eq!(m, None);
+    }
+
+    #[test]
+    fn valid_type_without_message_or_ai_errors() {
+        let cli = make_cli(Some("feat"), None, false);
+        let err = resolve_args(&cli).unwrap_err();
+        assert!(err.to_string().contains("requires a message or --ai"));
+    }
+
+    #[test]
+    fn raw_message_no_type() {
+        let cli = make_cli(Some("my raw commit message"), None, false);
+        let (t, m) = resolve_args(&cli).unwrap();
+        assert_eq!(t, None);
+        assert_eq!(m, Some("my raw commit message"));
+    }
+
+    #[test]
+    fn unknown_type_with_message_errors() {
+        let cli = make_cli(Some("unknown"), Some("something"), false);
+        let err = resolve_args(&cli).unwrap_err();
+        assert!(err.to_string().contains("not a valid commit type"));
+    }
+
+    #[test]
+    fn no_args_no_ai_errors() {
+        let cli = make_cli(None, None, false);
+        assert!(resolve_args(&cli).is_err());
+    }
+
+    #[test]
+    fn all_valid_types_accepted() {
+        for &t in TYPES {
+            let cli = make_cli(Some(t), Some("msg"), false);
+            let (typ, msg) = resolve_args(&cli).unwrap();
+            assert_eq!(typ, Some(t));
+            assert_eq!(msg, Some("msg"));
+        }
+    }
+
+    #[test]
+    fn all_valid_types_with_ai_accepted() {
+        for &t in TYPES {
+            let cli = make_cli(Some(t), None, true);
+            let (typ, msg) = resolve_args(&cli).unwrap();
+            assert_eq!(typ, Some(t));
+            assert_eq!(msg, None);
+        }
     }
 }

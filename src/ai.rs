@@ -53,5 +53,18 @@ pub fn generate_with_hint(diff: &str, commit_type: Option<&str>, hint: Option<&s
         .context("failed to reach Ollama — is it running on localhost:11434?")?;
 
     let body: Response = resp.json().context("failed to parse Ollama response")?;
-    Ok(body.response.trim().to_string())
+    Ok(strip_fences(body.response.trim()))
+}
+
+fn strip_fences(s: &str) -> String {
+    if !s.starts_with("```") {
+        return s.to_string();
+    }
+    let lines: Vec<&str> = s.lines().collect();
+    let end = if lines.last().map(|l| l.trim()) == Some("```") {
+        lines.len() - 1
+    } else {
+        lines.len()
+    };
+    lines[1..end].join("\n").trim().to_string()
 }
