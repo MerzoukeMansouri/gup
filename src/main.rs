@@ -67,7 +67,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn resolve_args<'a>(cli: &'a Cli) -> Result<(Option<&'a str>, Option<&'a str>)> {
+fn resolve_args(cli: &Cli) -> Result<(Option<&str>, Option<&str>)> {
     let first = cli.first.as_deref();
     let message = cli.message.as_deref();
 
