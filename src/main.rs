@@ -40,7 +40,13 @@ fn main() -> Result<()> {
         bail!("nothing to commit — working tree clean");
     }
 
-    let diff = if cli.ai { git::staged_diff()? } else { String::new() };
+    let diff = if cli.ai {
+        git::staged_diff()?
+    } else {
+        String::new()
+    };
+    let stats = git::staged_stat().unwrap_or_default();
+    let log = git::log_graph().unwrap_or_default();
 
     let initial_msg = if cli.ai {
         None // TUI shows spinner while generating
@@ -51,7 +57,7 @@ fn main() -> Result<()> {
         })
     };
 
-    let commit_msg = ui::run(initial_msg, commit_type, cli.ai, diff)?;
+    let commit_msg = ui::run(initial_msg, commit_type, cli.ai, diff, stats, log)?;
 
     git::commit(&commit_msg)?;
     if !cli.no_push {
@@ -78,7 +84,10 @@ fn resolve_args(cli: &Cli) -> Result<(Option<&str>, Option<&str>)> {
         (Some(raw), None, false) => Ok((None, Some(raw))),
 
         (Some(bad), Some(_), _) => {
-            bail!("'{bad}' is not a valid commit type. Valid: {}", TYPES.join(", "))
+            bail!(
+                "'{bad}' is not a valid commit type. Valid: {}",
+                TYPES.join(", ")
+            )
         }
 
         _ => bail!(

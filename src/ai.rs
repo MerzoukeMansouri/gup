@@ -16,11 +16,11 @@ struct Response {
     response: String,
 }
 
-pub fn generate(diff: &str, commit_type: Option<&str>) -> Result<String> {
-    generate_with_hint(diff, commit_type, None)
-}
-
-pub fn generate_with_hint(diff: &str, commit_type: Option<&str>, hint: Option<&str>) -> Result<String> {
+pub fn generate_with_hint(
+    diff: &str,
+    commit_type: Option<&str>,
+    hint: Option<&str>,
+) -> Result<String> {
     let type_rule = match commit_type {
         Some(t) => format!(
             "The commit type is fixed: '{t}'. Output ONLY the description after '{t}: ' — do NOT include the type prefix in your response."
@@ -48,7 +48,11 @@ pub fn generate_with_hint(diff: &str, commit_type: Option<&str>, hint: Option<&s
     let client = reqwest::blocking::Client::new();
     let resp = client
         .post(OLLAMA_URL)
-        .json(&Request { model: MODEL, prompt, stream: false })
+        .json(&Request {
+            model: MODEL,
+            prompt,
+            stream: false,
+        })
         .send()
         .context("failed to reach Ollama — is it running on localhost:11434?")?;
 
@@ -56,7 +60,7 @@ pub fn generate_with_hint(diff: &str, commit_type: Option<&str>, hint: Option<&s
     Ok(strip_fences(body.response.trim()))
 }
 
-fn strip_fences(s: &str) -> String {
+pub(crate) fn strip_fences(s: &str) -> String {
     if !s.starts_with("```") {
         return s.to_string();
     }
@@ -67,4 +71,38 @@ fn strip_fences(s: &str) -> String {
         lines.len()
     };
     lines[1..end].join("\n").trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_fences_plain_message() {
+        assert_eq!(strip_fences("feat: add login"), "feat: add login");
+    }
+
+    #[test]
+    fn strip_fences_with_closing_fence() {
+        let input = "```\nfeat: add login\n```";
+        assert_eq!(strip_fences(input), "feat: add login");
+    }
+
+    #[test]
+    fn strip_fences_with_language_tag() {
+        let input = "```text\nfix: handle null pointer\n```";
+        assert_eq!(strip_fences(input), "fix: handle null pointer");
+    }
+
+    #[test]
+    fn strip_fences_multiline_keeps_first_line() {
+        let input = "```\nfeat: add feature\nextra line\n```";
+        assert_eq!(strip_fences(input), "feat: add feature\nextra line");
+    }
+
+    #[test]
+    fn strip_fences_unclosed_fence() {
+        let input = "```\nfeat: add feature";
+        assert_eq!(strip_fences(input), "feat: add feature");
+    }
 }

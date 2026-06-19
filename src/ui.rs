@@ -17,12 +17,21 @@ use std::{
     time::Duration,
 };
 
+use crate::git::FileStat;
+
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 enum State {
-    Loading { tick: usize, rx: Receiver<Result<String>> },
-    Menu { selected: usize },
-    Editing { input: String },
+    Loading {
+        tick: usize,
+        rx: Receiver<Result<String>>,
+    },
+    Menu {
+        selected: usize,
+    },
+    Editing {
+        input: String,
+    },
 }
 
 struct App {
@@ -31,6 +40,8 @@ struct App {
     commit_type: Option<String>,
     use_ai: bool,
     diff: String,
+    stats: Vec<FileStat>,
+    log: String,
 }
 
 enum KeyAction {
@@ -51,6 +62,8 @@ pub fn run(
     commit_type: Option<&str>,
     use_ai: bool,
     diff: String,
+    stats: Vec<FileStat>,
+    log: String,
 ) -> Result<String> {
     let commit_type = commit_type.map(str::to_string);
 
@@ -62,7 +75,15 @@ pub fn run(
         }
     };
 
-    let mut app = App { msg, state, commit_type, use_ai, diff };
+    let mut app = App {
+        msg,
+        state,
+        commit_type,
+        use_ai,
+        diff,
+        stats,
+        log,
+    };
 
     enable_raw_mode()?;
     execute!(io::stderr(), EnterAlternateScreen)?;
@@ -88,7 +109,6 @@ fn event_loop<B: ratatui::backend::Backend>(
 
         terminal.draw(|f| render(f, app))?;
 
-        // Check if AI generation finished
         let gen_result: Option<Result<String>> = match &app.state {
             State::Loading { rx, .. } => match rx.try_recv() {
                 Ok(r) => Some(r),
@@ -115,7 +135,9 @@ fn event_loop<B: ratatui::backend::Backend>(
             continue;
         }
 
-        let Event::Key(key) = event::read()? else { continue };
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -139,7 +161,9 @@ fn event_loop<B: ratatui::backend::Backend>(
                 }
             }
             KeyAction::StartEditing => {
-                app.state = State::Editing { input: String::new() };
+                app.state = State::Editing {
+                    input: String::new(),
+                };
             }
             KeyAction::BackToMenu => {
                 app.state = State::Menu { selected: 1 };
@@ -184,7 +208,7 @@ fn compute_action(state: &State, code: KeyCode) -> KeyAction {
                 0 => KeyAction::Proceed,
                 _ => KeyAction::StartEditing,
             },
-            KeyCode::Esc => KeyAction::Cancel,
+            KeyCode::Esc | KeyCode::Char('q') => KeyAction::Cancel,
             _ => KeyAction::None,
         },
         State::Editing { input } => match code {
@@ -218,30 +242,61 @@ fn spawn_generation(
     rx
 }
 
+// ── Layout ───────────────────────────────────────────────────────────────────
+//
+//  ┌────────────── left (40%) ──────────────┐  ┌─── right (60%) ───────────┐
+//  │ ┌ commit ──────────────────────────┐   │  │ ┌ changes ──────────────┐ │
+//  │ │ feat: …                          │   │  │ │ src/ui.rs  +180  -45  │ │
+//  │ └──────────────────────────────────┘   │  │ └───────────────────────┘ │
+//  │ ┌ actions ─────────────────────────┐   │  │ ┌ log ───────────────────┐│
+//  │ │ ▶ Proceed                        │   │  │ │ * abc feat: …          ││
+//  │ │   Improve  [feedback___________] │   │  │ │ * def fix: …           ││
+//  │ └──────────────────────────────────┘   │  │ └───────────────────────┘ │
+//  │ hint                                   │  └────────────────────────────┘
+//  └────────────────────────────────────────┘
+
 fn render(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
-    let layout = Layout::default()
+
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(5),
-            Constraint::Length(1),
-            Constraint::Min(0),
+            Constraint::Length(3), // commit header
+            Constraint::Min(0),    // changes | log
+            Constraint::Length(3), // actions
+            Constraint::Length(1), // hint
         ])
         .split(area);
 
-    render_commit(f, app, layout[0]);
-    render_actions(f, app, layout[1]);
-    render_hint(f, &app.state, layout[2]);
+    render_commit(f, app, rows[0]);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(rows[1]);
+
+    render_changes(f, app, cols[0]);
+    render_log(f, app, cols[1]);
+
+    render_actions(f, app, rows[2]);
+    render_hint(f, &app.state, rows[3]);
 }
 
 fn render_commit(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let text = if app.msg.is_empty() { "…" } else { app.msg.as_str() };
+    let text = if app.msg.is_empty() {
+        "…"
+    } else {
+        app.msg.as_str()
+    };
     f.render_widget(
         Paragraph::new(text)
             .block(Block::default().title(" commit ").borders(Borders::ALL))
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -259,7 +314,11 @@ fn render_actions(f: &mut ratatui::Frame, app: &App, area: Rect) {
             f.render_widget(
                 Paragraph::new(format!("  {spinner}  generating…"))
                     .style(Style::default().fg(Color::Yellow)),
-                Rect { y, height: 1, ..inner },
+                Rect {
+                    y,
+                    height: 1,
+                    ..inner
+                },
             );
         }
         _ => {
@@ -269,11 +328,22 @@ fn render_actions(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 _ => 0,
             };
 
-            for (i, label) in ["Proceed", "Improve"].iter().enumerate() {
-                let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+            // Horizontal layout: [Proceed] [Improve inline-input]
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+                .split(inner);
+
+            for (i, (label, area)) in ["Proceed", "Improve"]
+                .iter()
+                .zip([cols[0], cols[1]])
+                .enumerate()
+            {
                 let is_sel = i == selected;
                 let style = if is_sel {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -281,14 +351,14 @@ fn render_actions(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
                 if i == 1 {
                     if let State::Editing { input } = &app.state {
-                        render_inline_input(f, row, style, label, prefix, input);
+                        render_inline_input(f, area, style, label, prefix, input);
                         continue;
                     }
                 }
 
                 f.render_widget(
                     Paragraph::new(format!("{prefix}{label}")).style(style),
-                    row,
+                    area,
                 );
             }
         }
@@ -311,13 +381,19 @@ fn render_inline_input(
         return;
     }
 
-    let label_area = Rect { width: label_w, ..row };
-    let input_area = Rect { x: row.x + label_w, width: row.width - label_w, ..row };
+    let label_area = Rect {
+        width: label_w,
+        ..row
+    };
+    let input_area = Rect {
+        x: row.x + label_w,
+        width: row.width - label_w,
+        ..row
+    };
 
     f.render_widget(Paragraph::new(label_text).style(style), label_area);
     f.render_widget(
-        Paragraph::new(input)
-            .style(Style::default().fg(Color::White).bg(Color::DarkGray)),
+        Paragraph::new(input).style(Style::default().fg(Color::White).bg(Color::DarkGray)),
         input_area,
     );
 
@@ -329,11 +405,48 @@ fn render_inline_input(
 fn render_hint(f: &mut ratatui::Frame, state: &State, area: Rect) {
     let hint = match state {
         State::Loading { .. } => "",
-        State::Menu { .. } => "↑/↓  navigate   Enter  select   Esc  cancel",
+        State::Menu { .. } => "↑/↓  navigate   Enter  select   Esc/q  cancel",
         State::Editing { .. } => "Enter  confirm   Esc  back",
     };
     f.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
+}
+
+fn render_changes(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let max_file = app.stats.iter().map(|s| s.file.len()).max().unwrap_or(0);
+
+    let lines: Vec<String> = app
+        .stats
+        .iter()
+        .map(|s| {
+            let padding = max_file - s.file.len();
+            format!(
+                "{}{}  +{}  -{}",
+                s.file,
+                " ".repeat(padding),
+                s.added,
+                s.deleted
+            )
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines.join("\n"))
+            .block(Block::default().title(" changes ").borders(Borders::ALL))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_log(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    f.render_widget(
+        Paragraph::new(app.log.as_str())
+            .block(Block::default().title(" log ").borders(Borders::ALL))
+            .style(Style::default().fg(Color::Gray))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
