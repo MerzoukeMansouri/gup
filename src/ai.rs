@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::sync::mpsc::Sender;
 
 const OLLAMA_URL: &str = "http://localhost:11434/api/generate";
-const MODEL: &str = "devstral-small-2:24b-cloud";
+const MODEL: &str = "mistral";
 
 #[derive(Serialize)]
 struct Request<'a> {
